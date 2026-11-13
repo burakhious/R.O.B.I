@@ -377,8 +377,16 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // URL'yi normalize et: Eğer /robi veya /Robi ile geliyorsa prefix'i temizle
+  let cleanUrl = req.url || "/";
+  if (cleanUrl.toLowerCase().startsWith("/robi/")) {
+    cleanUrl = cleanUrl.slice(5) || "/";
+  } else if (cleanUrl.toLowerCase() === "/robi") {
+    cleanUrl = "/";
+  }
+
   // 1. Ana Sayfa (Web Arayüzü)
-  if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
+  if (req.method === "GET" && (cleanUrl === "/" || cleanUrl === "/index.html")) {
     const filePath = path.join(__dirname, "public", "index.html");
     if (fs.existsSync(filePath)) {
       const html = fs.readFileSync(filePath, "utf-8");
@@ -389,8 +397,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 2. Medya Dosyaları Servisi (/media/...)
-  if (req.method === "GET" && req.url.startsWith("/media/")) {
-    const relFile = decodeURIComponent(req.url.replace(/^\/media\//, ""));
+  if (req.method === "GET" && cleanUrl.startsWith("/media/")) {
+    const relFile = decodeURIComponent(cleanUrl.replace(/^\/media\//, ""));
     const safePath = path.resolve(MEDIA_DIR, relFile);
     if (safePath.startsWith(MEDIA_DIR) && fs.existsSync(safePath)) {
       const stat = fs.statSync(safePath);
@@ -418,7 +426,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 3. Dosya Yükleme API (/api/upload)
-  if (req.method === "POST" && req.url === "/api/upload") {
+  if (req.method === "POST" && cleanUrl === "/api/upload") {
     const rawFilename = req.headers["x-filename"] || `upload_${Date.now()}.mp4`;
     const safeFilename = path.basename(decodeURIComponent(rawFilename));
     const targetPath = path.join(MEDIA_DIR, safeFilename);
@@ -443,7 +451,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 4. Sohbet & Ajan API (/api/chat)
-  if (req.method === "POST" && req.url === "/api/chat") {
+  if (req.method === "POST" && cleanUrl === "/api/chat") {
     let body = "";
     req.on("data", chunk => { body += chunk; });
     req.on("end", async () => {

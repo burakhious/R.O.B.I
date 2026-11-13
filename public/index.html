@@ -435,6 +435,7 @@
     drawCore();
 
     // 2. Mesajlaşma ve API İletişimi
+    const BASE_PATH = window.location.pathname.replace(/\/+$/, "").replace(/\/index\.html$/i, "");
     const chatMessages = document.getElementById("chatMessages");
     const userInput = document.getElementById("userInput");
     const sendBtn = document.getElementById("sendBtn");
@@ -461,9 +462,9 @@
       }
 
       // Eğer yanıtta bir video bağlantısı (/media/*.mp4) varsa doğrudan video oynatıcı ekle!
-      const mediaMatch = text.match(/\/media\/([^\s\)"']+?\.(mp4|webm|mov))/i);
+      const mediaMatch = text.match(/\/?media\/([^\s\)"']+?\.(mp4|webm|mov))/i);
       if (mediaMatch) {
-        const videoUrl = mediaMatch[0];
+        const videoUrl = `${BASE_PATH}/media/${mediaMatch[1]}`;
         const vBox = document.createElement("div");
         vBox.className = "video-preview";
         vBox.innerHTML = `<video src="${videoUrl}" controls autoplay muted playsinline></video>`;
@@ -485,7 +486,7 @@
       voiceStatus.textContent = "R.O.B.I. düşünüyor...";
 
       try {
-        const resp = await fetch("/api/chat", {
+        const resp = await fetch(`${BASE_PATH}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: cleanText })
@@ -592,7 +593,7 @@
       voiceStatus.textContent = `"${file.name}" yükleniyor...`;
 
       try {
-        const resp = await fetch("/api/upload", {
+        const resp = await fetch(`${BASE_PATH}/api/upload`, {
           method: "POST",
           headers: {
             "Content-Type": "application/octet-stream",
