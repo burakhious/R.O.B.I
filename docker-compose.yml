@@ -1,0 +1,13 @@
+services:
+  robi:
+    build: .
+    container_name: robi
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./media:/app/media
+    environment:
+      - PORT=3000

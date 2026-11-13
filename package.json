@@ -1,0 +1,11 @@
+{
+  "name": "robi-agent",
+  "version": "1.0.0",
+  "description": "R.O.B.I. - Robodemy Operational Brain & Intelligence",
+  "main": "server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {}
+}
