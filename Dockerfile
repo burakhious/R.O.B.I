@@ -1,11 +1,12 @@
 FROM node:20-bookworm-slim
 
-# FFmpeg ve gerekli sistem araçlarını kur
+# FFmpeg, curl, python3, procps ve Docker CLI kur
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     python3 \
     procps \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

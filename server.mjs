@@ -2,8 +2,19 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+// Güvenlik ve Kimlik Doğrulama Modülü
+import { authenticate, verifySession, invalidateSession, getClientIp } from "./lib/auth.mjs";
+
+// Yetenek Modülleri
+import { sendTelegramMessage, isTelegramConfigured } from "./lib/telegram.mjs";
+import { listContainers, getContainerLogs, restartContainer, cleanDocker, checkDiskUsage } from "./lib/docker.mjs";
+import { checkInbox, sendEmail, prepareEmailDraft } from "./lib/mail.mjs";
+import { triggerN8nWebhook } from "./lib/n8n.mjs";
+import { generateMorningBriefing } from "./lib/briefing.mjs";
+import { startScheduler, triggerManualBriefing } from "./lib/scheduler.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -35,215 +46,233 @@ if (!fs.existsSync(MEDIA_DIR)) {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-// Güvenli komut çalıştırma yardımcısı
-function runShell(command, timeoutMs = 120000) {
-  const isWin = process.platform === "win32";
-  const shell = isWin ? "powershell.exe -NoProfile -Command" : "bash -c";
-  const sanitized = isWin ? `"${command.replace(/"/g, '`"')}"` : `'${command.replace(/'/g, "'\\''")}'`;
-  return execSync(`${shell} ${sanitized}`, {
-    encoding: "utf-8",
-    timeout: timeoutMs,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+// Güvenli dosya adı ve zaman formatı doğrulayıcıları (Path Traversal ve Injection Koruması)
+function safeMediaFilename(filename) {
+  if (typeof filename !== "string") return null;
+  const base = filename.trim().split(/[\\\/]/).pop();
+  if (!base || base.startsWith(".") || !/^[a-zA-Z0-9_\-][a-zA-Z0-9_\.\-]*$/.test(base)) {
+    return null;
+  }
+  return base;
 }
 
-// R.O.B.I. Araçları (Tools)
+function safeMediaTime(t) {
+  if (typeof t !== "string" && typeof t !== "number") return null;
+  const s = String(t).trim();
+  if (!/^[0-9]+(:[0-9]{2}){0,2}(\.[0-9]+)?$/.test(s)) return null;
+  return s;
+}
+
+// İzin verilen güvenli medya uzantıları
+const ALLOWED_MEDIA_EXTS = new Set([
+  ".mp4", ".mov", ".webm", ".avi", ".mkv",
+  ".mp3", ".wav", ".aac", ".ogg",
+  ".jpg", ".jpeg", ".png", ".gif", ".webp"
+]);
+
+// R.O.B.I. Güvenli Araçları (Tools) - Arbitrary Terminal/File Read-Write TAMAMEN KALDIRILMIŞTIR
 const tools = {
-  execute_command: ({ command }) => {
+  // 1. Güvenli Medya Listeleme
+  list_media_files: () => {
     try {
-      const res = runShell(command);
-      return res.trim() || "[Komut başarıyla tamamlandı, çıktı yok]";
-    } catch (err) {
-      return `[Hata]: ${err.stdout || err.stderr || err.message}`;
-    }
-  },
-
-  read_file: ({ filePath }) => {
-    try {
-      const fullPath = path.resolve(filePath);
-      if (!fs.existsSync(fullPath)) return `[Hata]: '${filePath}' bulunamadı.`;
-      const content = fs.readFileSync(fullPath, "utf-8");
-      return content.length > 5000 ? content.slice(0, 5000) + "\n...[Kısaltıldı]" : content;
+      const items = fs.readdirSync(MEDIA_DIR, { withFileTypes: true });
+      const files = items.filter(i => i.isFile() && !i.name.startsWith(".")).map(i => i.name);
+      if (files.length === 0) return "[Bilgi]: Media klasöründe henüz herhangi bir medya dosyası bulunmuyor.";
+      return "Media Klasöründeki Dosyalar:\n" + files.map(f => `• ${f} (/media/${f})`).join("\n");
     } catch (err) {
       return `[Hata]: ${err.message}`;
     }
   },
 
-  write_file: ({ filePath, content }) => {
+  // 2. Video & Medya Düzenleme (Parametre Doğrulamalı ve Shell'siz Güvenli Çağrılar)
+  video_info: ({ filename }) => {
     try {
-      const fullPath = path.resolve(filePath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(fullPath, content, "utf-8");
-      return `[Başarılı]: '${filePath}' dosyası kaydedildi.`;
+      const safeName = safeMediaFilename(filename);
+      if (!safeName) return "[Güvenlik Hatası]: Geçersiz dosya adı.";
+      const fullPath = path.join(MEDIA_DIR, safeName);
+      if (!fs.existsSync(fullPath)) return `[Hata]: '${safeName}' media klasöründe bulunamadı.`;
+
+      const args = [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,duration,codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=0",
+        fullPath
+      ];
+      const output = execFileSync("ffprobe", args, { encoding: "utf-8", timeout: 15000 });
+      return output.trim() || "[Bilgi]: Video bilgileri alındı.";
     } catch (err) {
-      return `[Hata]: ${err.message}`;
+      return `[Hata]: FFprobe çalıştırılamadı: ${err.message}`;
     }
   },
 
-  list_directory: ({ dirPath = "." }) => {
+  video_trim: ({ inputFilename, outputFilename, startTime, endTime }) => {
     try {
-      const target = path.resolve(dirPath);
-      if (!fs.existsSync(target)) return `[Hata]: Dizin bulunamadı: ${dirPath}`;
-      const items = fs.readdirSync(target, { withFileTypes: true });
-      return items.map(i => `${i.isDirectory() ? "[KLASÖR]" : "[DOSYA]"} ${i.name}`).join("\n");
+      const inBase = safeMediaFilename(inputFilename);
+      const outBase = safeMediaFilename(outputFilename);
+      const sTime = safeMediaTime(startTime);
+      const eTime = safeMediaTime(endTime);
+
+      if (!inBase || !outBase) return "[Güvenlik Hatası]: Dosya adları geçersiz veya tehlikeli karakterler içeriyor.";
+      if (!sTime || !eTime) return "[Güvenlik Hatası]: Başlangıç veya bitiş zaman formatı geçersiz.";
+
+      const inPath = path.join(MEDIA_DIR, inBase);
+      const outPath = path.join(MEDIA_DIR, outBase);
+      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inBase}' bulunamadı.`;
+
+      const args = ["-y", "-ss", sTime, "-to", eTime, "-i", inPath, "-c", "copy", outPath];
+      execFileSync("ffmpeg", args, { encoding: "utf-8", timeout: 180000 });
+      return `[Başarılı]: Video kesildi ve kaydedildi: /media/${outBase}`;
     } catch (err) {
-      return `[Hata]: ${err.message}`;
+      return `[Hata]: Video kesme işlemi başarısız: ${err.message}`;
     }
   },
 
+  video_to_reels: ({ inputFilename, outputFilename }) => {
+    try {
+      const inBase = safeMediaFilename(inputFilename);
+      const outBase = safeMediaFilename(outputFilename);
+      if (!inBase || !outBase) return "[Güvenlik Hatası]: Geçersiz dosya adı.";
+
+      const inPath = path.join(MEDIA_DIR, inBase);
+      const outPath = path.join(MEDIA_DIR, outBase);
+      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inBase}' bulunamadı.`;
+
+      const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=min(h\\,w)/20:luma_power=1:chroma_radius=min(cw\\,ch)/20:chroma_power=1[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`;
+      const args = ["-y", "-i", inPath, "-lavfi", filter, "-c:a", "copy", outPath];
+      execFileSync("ffmpeg", args, { encoding: "utf-8", timeout: 300000 });
+      return `[Başarılı]: Video 9:16 Reels/TikTok formatına dönüştürüldü: /media/${outBase}`;
+    } catch (err) {
+      return `[Hata]: Reels dönüştürme başarısız: ${err.message}`;
+    }
+  },
+
+  video_extract_audio: ({ inputFilename, outputFilename }) => {
+    try {
+      const inBase = safeMediaFilename(inputFilename);
+      const outBase = safeMediaFilename(outputFilename);
+      if (!inBase || !outBase) return "[Güvenlik Hatası]: Geçersiz dosya adı.";
+
+      const inPath = path.join(MEDIA_DIR, inBase);
+      const outPath = path.join(MEDIA_DIR, outBase);
+      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inBase}' bulunamadı.`;
+
+      const args = ["-y", "-i", inPath, "-vn", "-acodec", "libmp3lame", "-q:a", "2", outPath];
+      execFileSync("ffmpeg", args, { encoding: "utf-8", timeout: 120000 });
+      return `[Başarılı]: Ses ayrıştırıldı: /media/${outBase}`;
+    } catch (err) {
+      return `[Hata]: Ses ayıklama başarısız: ${err.message}`;
+    }
+  },
+
+  video_compress: ({ inputFilename, outputFilename, crf = 28 }) => {
+    try {
+      const inBase = safeMediaFilename(inputFilename);
+      const outBase = safeMediaFilename(outputFilename);
+      if (!inBase || !outBase) return "[Güvenlik Hatası]: Geçersiz dosya adı.";
+
+      const safeCrf = Math.min(Math.max(parseInt(crf, 10) || 28, 18), 36);
+      const inPath = path.join(MEDIA_DIR, inBase);
+      const outPath = path.join(MEDIA_DIR, outBase);
+      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inBase}' bulunamadı.`;
+
+      const args = ["-y", "-i", inPath, "-vcodec", "libx264", "-crf", String(safeCrf), "-preset", "fast", "-acodec", "aac", "-b:a", "128k", outPath];
+      execFileSync("ffmpeg", args, { encoding: "utf-8", timeout: 300000 });
+      return `[Başarılı]: Video sıkıştırıldı: /media/${outBase}`;
+    } catch (err) {
+      return `[Hata]: Video sıkıştırma başarısız: ${err.message}`;
+    }
+  },
+
+  // 3. Sistem Sağlığı Raporu (Salt Okunur)
   get_system_status: () => {
     try {
       const totalMem = (os.totalmem() / 1024 / 1024 / 1024).toFixed(1);
       const freeMem = (os.freemem() / 1024 / 1024 / 1024).toFixed(1);
       const cpus = os.cpus();
       const uptimeH = (os.uptime() / 3600).toFixed(1);
-
-      let gpuInfo = "GPU bilgisi yok";
-      try {
-        gpuInfo = runShell("nvidia-smi --query-gpu=name,memory.total,memory.free,temperature.gpu --format=csv,noheader", 5000).trim();
-      } catch {}
+      const disk = checkDiskUsage();
 
       return [
         `İşletim Sistemi: ${os.type()} ${os.release()} (${os.arch()})`,
         `Çalışma Süresi (Uptime): ${uptimeH} saat`,
         `İşlemci: ${cpus[0]?.model || "Bilinmiyor"} (${cpus.length} Çekirdek)`,
         `Bellek (RAM): Toplam ${totalMem} GB | Boşta ${freeMem} GB`,
-        `Ekran Kartı: ${gpuInfo}`
+        `Disk Durumu: Toplam ${disk.totalGB} GB | Dolu: %${disk.percentUsed} | Boş: ${disk.freeGB} GB`
       ].join("\n");
     } catch (err) {
       return `[Sistem Durumu Hatası]: ${err.message}`;
     }
   },
 
-  // Video Düzenleme Araçları (FFmpeg)
-  video_info: ({ filename }) => {
-    try {
-      const fullPath = path.resolve(MEDIA_DIR, filename);
-      if (!fs.existsSync(fullPath)) return `[Hata]: '${filename}' media klasöründe bulunamadı.`;
-      const cmd = `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration,codec_name -of default=noprint_wrappers=1:nokey=0 "${fullPath}"`;
-      return runShell(cmd, 15000);
-    } catch (err) {
-      return `[Hata]: ${err.message}`;
-    }
+  check_disk_usage: () => {
+    const res = checkDiskUsage();
+    return res.summary;
   },
 
-  video_trim: ({ inputFilename, outputFilename, startTime, endTime }) => {
-    try {
-      const inPath = path.resolve(MEDIA_DIR, inputFilename);
-      const outPath = path.resolve(MEDIA_DIR, outputFilename);
-      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inputFilename}' bulunamadı.`;
-
-      // Hızlı ve kayıpsız kesme
-      const cmd = `ffmpeg -y -ss ${startTime} -to ${endTime} -i "${inPath}" -c copy "${outPath}"`;
-      runShell(cmd, 180000);
-      return `[Başarılı]: Video kesildi ve kaydedildi: /media/${outputFilename}`;
-    } catch (err) {
-      return `[Hata]: ${err.message}`;
-    }
+  // 4. Docker ve Servis Yönetimi (Regex Doğrulamalı)
+  docker_list_containers: ({ all = false } = {}) => {
+    return listContainers(all);
   },
 
-  video_to_reels: ({ inputFilename, outputFilename }) => {
-    try {
-      const inPath = path.resolve(MEDIA_DIR, inputFilename);
-      const outPath = path.resolve(MEDIA_DIR, outputFilename);
-      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inputFilename}' bulunamadı.`;
-
-      // 16:9 yatay videoyu 9:16 dikey yaparak üst ve alta bulanık arka plan ekleme
-      const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=min(h\\,w)/20:luma_power=1:chroma_radius=min(cw\\,ch)/20:chroma_power=1[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`;
-      const cmd = `ffmpeg -y -i "${inPath}" -lavfi "${filter}" -c:a copy "${outPath}"`;
-      runShell(cmd, 300000);
-      return `[Başarılı]: Video 9:16 Reels/TikTok formatına dönüştürüldü: /media/${outputFilename}`;
-    } catch (err) {
-      return `[Hata]: ${err.message}`;
-    }
+  docker_container_logs: ({ containerName, lines = 50, filter = "" }) => {
+    return getContainerLogs(containerName, lines, filter);
   },
 
-  video_extract_audio: ({ inputFilename, outputFilename }) => {
-    try {
-      const inPath = path.resolve(MEDIA_DIR, inputFilename);
-      const outPath = path.resolve(MEDIA_DIR, outputFilename);
-      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inputFilename}' bulunamadı.`;
-
-      const cmd = `ffmpeg -y -i "${inPath}" -vn -acodec libmp3lame -q:a 2 "${outPath}"`;
-      runShell(cmd, 120000);
-      return `[Başarılı]: Ses ayrıştırıldı: /media/${outputFilename}`;
-    } catch (err) {
-      return `[Hata]: ${err.message}`;
-    }
+  docker_restart_container: ({ containerName }) => {
+    return restartContainer(containerName);
   },
 
-  video_compress: ({ inputFilename, outputFilename, crf = 28 }) => {
-    try {
-      const inPath = path.resolve(MEDIA_DIR, inputFilename);
-      const outPath = path.resolve(MEDIA_DIR, outputFilename);
-      if (!fs.existsSync(inPath)) return `[Hata]: Giriş dosyası '${inputFilename}' bulunamadı.`;
+  docker_cleanup: ({ pruneVolumes = false } = {}) => {
+    return cleanDocker(pruneVolumes);
+  },
 
-      const cmd = `ffmpeg -y -i "${inPath}" -vcodec libx264 -crf ${crf} -preset fast -acodec aac -b:a 128k "${outPath}"`;
-      runShell(cmd, 300000);
-      return `[Başarılı]: Video sıkıştırıldı: /media/${outputFilename}`;
-    } catch (err) {
-      return `[Hata]: ${err.message}`;
+  // 5. E-Posta Entegrasyonu
+  mail_check_inbox: async ({ limit = 5, unreadOnly = false, filterSender = "" } = {}) => {
+    const res = await checkInbox({ limit, unreadOnly, filterSender });
+    if (!res.success) return res.message;
+    return res.summary || "Gelen kutusunda e-posta bulunamadı.";
+  },
+
+  mail_send: async ({ to, subject, body }) => {
+    const res = await sendEmail({ to, subject, body });
+    return res.message;
+  },
+
+  mail_draft_preview: ({ to, subject, body }) => {
+    return prepareEmailDraft({ to, subject, body });
+  },
+
+  // 6. Proaktif Telegram Bildirim Kanalı
+  send_telegram_notification: async ({ message, parseMode = "HTML" }) => {
+    const res = await sendTelegramMessage(message, { parseMode });
+    if (res.success) return "[Başarılı]: Bildirim Telegram üzerinden Mustafa Bey'e iletildi.";
+    return `[Telegram Hatası]: ${res.error}`;
+  },
+
+  // 7. Otomasyon & Zamanlayıcı & n8n
+  get_morning_briefing: async ({ sendToTelegram = false } = {}) => {
+    const briefing = await generateMorningBriefing();
+    if (sendToTelegram && isTelegramConfigured()) {
+      await sendTelegramMessage(briefing.html, { parseMode: "HTML" });
     }
+    return briefing.text;
+  },
+
+  trigger_n8n_webhook: async ({ webhookPath, payload = {} }) => {
+    const res = await triggerN8nWebhook(webhookPath, payload);
+    return res.message;
   }
 };
 
 const toolsSchema = [
+  // Medya ve Video Araçları
   {
     type: "function",
     function: {
-      name: "execute_command",
-      description: "Sunucuda terminal komutu (bash/shell) çalıştırır.",
-      parameters: {
-        type: "object",
-        properties: { command: { type: "string", description: "Çalıştırılacak terminal komutu" } },
-        required: ["command"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_system_status",
-      description: "Sunucunun RAM, CPU, GPU, Uptime ve işletim sistemi durumunu raporlar.",
+      name: "list_media_files",
+      description: "Media klasöründe bulunan video ve ses dosyalarını listeler.",
       parameters: { type: "object", properties: {} }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_directory",
-      description: "Klasördeki dosya ve klasörleri listeler.",
-      parameters: {
-        type: "object",
-        properties: { dirPath: { type: "string", description: "Klasör yolu (varsayılan: .)" } }
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Belirtilen dosyanın içeriğini okur.",
-      parameters: {
-        type: "object",
-        properties: { filePath: { type: "string", description: "Dosya yolu" } },
-        required: ["filePath"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "write_file",
-      description: "Dosyaya içerik yazar veya yeni dosya oluşturur.",
-      parameters: {
-        type: "object",
-        properties: {
-          filePath: { type: "string", description: "Dosya yolu" },
-          content: { type: "string", description: "Dosya içeriği" }
-        },
-        required: ["filePath", "content"]
-      }
     }
   },
   {
@@ -315,23 +344,205 @@ const toolsSchema = [
         properties: {
           inputFilename: { type: "string", description: "Giriş videosu" },
           outputFilename: { type: "string", description: "Çıkış videosu" },
-          crf: { type: "number", description: "Sıkıştırma faktörü (varsayılan: 28, 23-32 arası)" }
+          crf: { type: "number", description: "Sıkıştırma faktörü (varsayılan: 28, 18-36 arası)" }
         },
         required: ["inputFilename", "outputFilename"]
+      }
+    }
+  },
+
+  // Sistem ve Docker İzleme
+  {
+    type: "function",
+    function: {
+      name: "get_system_status",
+      description: "Sunucunun RAM, CPU, Uptime ve disk durumunu raporlar.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "check_disk_usage",
+      description: "Sunucunun disk kullanım oranını ve boş depolama alanını raporlar.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker_list_containers",
+      description: "Sunucudaki Docker konteynerlerini, çalışan web servislerini ve portlarını listeler.",
+      parameters: {
+        type: "object",
+        properties: {
+          all: { type: "boolean", description: "Duran konteynerler dahil hepsini mi listelesin?" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker_container_logs",
+      description: "Belirtilen Docker servisinin son satır loglarını inceler ve hata analizi yapar.",
+      parameters: {
+        type: "object",
+        properties: {
+          containerName: { type: "string", description: "Konteyner adı (örn: robi, blog, nginx)" },
+          lines: { type: "number", description: "Getirilecek satır sayısı (varsayılan: 50)" },
+          filter: { type: "string", description: "Loglarda aranacak filtre kelimesi (örn: error)" }
+        },
+        required: ["containerName"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker_restart_container",
+      description: "Belirtilen Docker konteynerini yeniden başlatır.",
+      parameters: {
+        type: "object",
+        properties: {
+          containerName: { type: "string", description: "Yeniden başlatılacak konteyner adı" }
+        },
+        required: ["containerName"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker_cleanup",
+      description: "Kullanılmayan Docker önbelleklerini ve durmuş konteynerleri temizler (docker system prune).",
+      parameters: {
+        type: "object",
+        properties: {
+          pruneVolumes: { type: "boolean", description: "Kullanılmayan volumeleri de temizlesin mi? (varsayılan: false)" }
+        }
+      }
+    }
+  },
+
+  // E-Posta Yönetimi
+  {
+    type: "function",
+    function: {
+      name: "mail_check_inbox",
+      description: "Gelen kutusundaki e-postaları sorgular, listeler veya özetler. Okunmamış veya belirli bir gönderenden gelen mailleri filtreleyebilir.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Getirilecek maksimum mail sayısı (varsayılan: 5)" },
+          unreadOnly: { type: "boolean", description: "Sadece okunmamış mailleri mi getirsin?" },
+          filterSender: { type: "string", description: "Belirli bir gönderen adına veya adresine göre filtrele" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "mail_send",
+      description: "Belirtilen alıcıya SMTP üzerinden e-posta gönderir. Kullanıcıdan onay alındıktan sonra çağrılmalıdır.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Alıcı e-posta adresi" },
+          subject: { type: "string", description: "E-posta konusu" },
+          body: { type: "string", description: "E-posta metin içeriği" }
+        },
+        required: ["to", "subject", "body"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "mail_draft_preview",
+      description: "Gönderilmeden önce kullanıcının onaylaması için e-posta taslağı oluşturur ve ekranda gösterir.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Alıcı e-posta adresi" },
+          subject: { type: "string", description: "E-posta konusu" },
+          body: { type: "string", description: "E-posta metin içeriği" }
+        },
+        required: ["to", "subject", "body"]
+      }
+    }
+  },
+
+  // Telegram Bildirimi
+  {
+    type: "function",
+    function: {
+      name: "send_telegram_notification",
+      description: "Mustafa Bey'in telefonuna Telegram üzerinden proaktif bildirim veya acil durum uyarısı gönderir.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "Gönderilecek mesaj metni (HTML veya düz metin)" },
+          parseMode: { type: "string", description: "Biçimlendirme türü: 'HTML' veya 'Markdown'", enum: ["HTML", "Markdown"] }
+        },
+        required: ["message"]
+      }
+    }
+  },
+
+  // Otomasyon ve n8n
+  {
+    type: "function",
+    function: {
+      name: "get_morning_briefing",
+      description: "Hava durumu, döviz kurları, okunmamış e-postalar ve sunucu durumunu içeren günlük Sabah Brifingini oluşturur.",
+      parameters: {
+        type: "object",
+        properties: {
+          sendToTelegram: { type: "boolean", description: "Hazırlanan brifingi doğrudan Mustafa Bey'in Telegram'ına da göndersin mi?" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "trigger_n8n_webhook",
+      description: "n8n otomasyon motoru üzerindeki bir senaryo webhook'unu tetikler.",
+      parameters: {
+        type: "object",
+        properties: {
+          webhookPath: { type: "string", description: "Tetiklenecek webhook adı/yolu (örn: 'sync-notion')" },
+          payload: { type: "object", description: "Webhook'a gönderilecek JSON veri paketi" }
+        },
+        required: ["webhookPath"]
       }
     }
   }
 ];
 
-const SYSTEM_PROMPT = `Sen R.O.B.I. (Robodemy Operational Brain & Intelligence) adında, Robodemy platformunun zeki, otonom ve operasyonel yapay zeka asistanısın.
+const SYSTEM_PROMPT = `Sen R.O.B.I. (Robodemy Operational Brain & Intelligence) adında, Robodemy platformunun güvenli, akıllı, otonom ve operasyonel yapay zeka asistanısın.
+Kullanıcın: Mustafa Bey'dir. Kendisine hitap ederken her zaman saygılı, samimi ve dinamik şekilde "Mustafa Bey" olarak hitap et.
 Arka planda NVIDIA Nemotron mimarisiyle çalışıyorsun.
-Kullanıcının Linux sunucusunu yönetebilir, terminal komutları çalıştırabilir, dosya okuyup yazabilir ve FFmpeg araçlarıyla profesyonel video düzenlemeleri (kesme, 9:16 dikey reels formatına çevirme, ses ayıklama, sıkıştırma) yapabilirsin.
 
-Kuralların:
-- İletişim dilin Türkçe, samimi, kibar, dinamik ve profesyoneldir.
-- Kullanıcıya cevap verirken hem sesli hem yazılı okunacağını unutma; anlaşılır ve akıcı ol.
-- Video düzenleme yaptıysan veya dosya ürettiysen kullanıcıya indirme/izleme linkini '/media/dosya_adi.mp4' formatında mutlaka belirt.
-- Sistem işlemlerinde hızlı, pratik ve çözüm odaklı ol.`;
+🛡️ KESİN GÜVENLİK KURALLARI (ASLA ÇİĞNENEMEZ):
+1. Terminal veya kabuk komutları (bash, sh, powershell, cmd) çalıştırma yetkin KESİNLİKLE YOKTUR ve bu yetki güvenlik nedeniyle tamamen kaldırılmıştır. Kullanıcıdan terminal komutu talebi gelirse, güvenlik politikaları gereğince doğrudan terminal komutu çalıştıramayacağını, yalnızca güvenli R.O.B.I. servislerini kullanabileceğini net ve nazik bir dille belirt.
+2. ASLA .env dosyasını, API anahtarlarını, şifreleri, veritabanı bağlantılarını veya sistem kimlik bilgilerini kullanıcıyla paylaşma, sızdırma veya ifşa etme.
+3. Yetkisiz dosya okuma/yazma yetkin yoktur. Sadece medya klasöründeki dosyalarla çalışabilirsin.
+4. Sistemin arka plan teknik açıklarını, zaafiyetlerini veya sunucu iç mimarisini kullanıcılara ifşa etme.
+5. Kullanıcı yeteneklerini sorduğunda ("ne yapabilirsin?", "neler yaparsın?"), yalnızca aşağıdaki onaylı operasyonel hizmetleri listele.
+
+Onaylı Yeteneklerin:
+1. 🎬 FFmpeg Medya & Video Düzenleme: Videoları kesme, 9:16 Reels/TikTok formatına dönüştürme, ses ayıklama ve sıkıştırma.
+2. 📧 E-Posta Yönetimi: Gelen e-postaları sorgulama, son 24 saati özetleme ve onay alındığında taslak hazırlayıp e-posta gönderme.
+3. 📱 Proaktif Telegram Bildirimleri: Acil durumlarda ve sabah brifinginde Mustafa Bey'in telefonuna Telegram üzerinden bildirim gönderme.
+4. ⏰ Sabah Brifingi & Otomasyon: Hava durumu, döviz kurları, bekleyen e-postalar ve sunucu durumunu derleme; n8n webhook'larını tetikleme.
+5. 📊 Sistem & Servis İzleme: RAM, CPU, disk doluluk durumu ve çalışan Docker servislerinin sağlık durumunu raporlama.
+
+İletişim Kuralları:
+- Dilin Türkçe, profesyonel, saygılı, net ve çözüm odaklıdır.
+- Yanıtlarının hem sesli hem yazılı dinleneceğini unutma, gereksiz kod veya komut çıktısı dökmek yerine anlaşılır Türkçe özetler ver.`;
 
 let conversationHistory = [{ role: "system", content: SYSTEM_PROMPT }];
 
@@ -347,8 +558,8 @@ async function callNemotron(messages, modelToUse = MODEL_NAME) {
       messages: messages,
       tools: toolsSchema,
       tool_choice: "auto",
-      temperature: 0.6,
-      max_tokens: 1500
+      temperature: 0.5,
+      max_tokens: 1800
     })
   });
 
@@ -364,12 +575,39 @@ async function callNemotron(messages, modelToUse = MODEL_NAME) {
   return await resp.json();
 }
 
+// Güvenli JSON gövde okuyucu (Bellek taşması korumalı - maks 1MB)
+function readJsonBody(req, maxSize = 1048576) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let size = 0;
+    req.on("data", chunk => {
+      size += chunk.length;
+      if (size > maxSize) {
+        req.destroy();
+        return reject(new Error("İstek boyutu çok büyük!"));
+      }
+      body += chunk;
+    });
+    req.on("end", () => {
+      try {
+        const parsed = body ? JSON.parse(body) : {};
+        resolve(parsed);
+      } catch (err) {
+        reject(new Error("Geçersiz JSON formatı."));
+      }
+    });
+    req.on("error", err => reject(err));
+  });
+}
+
 // HTTP Sunucusu
 const server = http.createServer(async (req, res) => {
-  // CORS başlıkları
+  const clientIp = getClientIp(req);
+
+  // Güvenli CORS başlıkları
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Filename");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Robi-Token, X-Filename");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -377,7 +615,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // URL'yi normalize et: Eğer /robi veya /Robi ile geliyorsa prefix'i temizle
+  // URL normalize et
   let cleanUrl = req.url || "/";
   if (cleanUrl.toLowerCase().startsWith("/robi/")) {
     cleanUrl = cleanUrl.slice(5) || "/";
@@ -385,7 +623,7 @@ const server = http.createServer(async (req, res) => {
     cleanUrl = "/";
   }
 
-  // 1. Ana Sayfa (Web Arayüzü)
+  // 1. Ana Sayfa (Web Arayüzü) - Herkese açık (kilit ekranı barındırır)
   if (req.method === "GET" && (cleanUrl === "/" || cleanUrl === "/index.html")) {
     const filePath = path.join(__dirname, "public", "index.html");
     if (fs.existsSync(filePath)) {
@@ -396,11 +634,57 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // 2. Medya Dosyaları Servisi (/media/...)
+  // 2. KİMLİK DOĞRULAMA ENDPOINT'LERİ (Auth Routes)
+  if (req.method === "POST" && cleanUrl === "/api/auth/login") {
+    try {
+      const { password } = await readJsonBody(req);
+      const authResult = authenticate(password, clientIp);
+
+      if (authResult.success) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          success: true,
+          token: authResult.token,
+          expiresAt: authResult.expiresAt
+        }));
+      } else {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ success: false, error: authResult.error }));
+      }
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (cleanUrl === "/api/auth/verify") {
+    const isValid = verifySession(req);
+    res.writeHead(isValid ? 200 : 401, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ authenticated: isValid }));
+    return;
+  }
+
+  if (req.method === "POST" && cleanUrl === "/api/auth/logout") {
+    invalidateSession(req);
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ success: true }));
+    return;
+  }
+
+  // 3. Medya Dosyaları Servisi (/media/...) - Path Traversal Korumalı
   if (req.method === "GET" && cleanUrl.startsWith("/media/")) {
-    const relFile = decodeURIComponent(cleanUrl.replace(/^\/media\//, ""));
-    const safePath = path.resolve(MEDIA_DIR, relFile);
-    if (safePath.startsWith(MEDIA_DIR) && fs.existsSync(safePath)) {
+    const rawName = decodeURIComponent(cleanUrl.replace(/^\/media\//, ""));
+    const safeName = safeMediaFilename(rawName);
+
+    if (!safeName) {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Geçersiz veya yetkisiz dosya talebi.");
+      return;
+    }
+
+    const safePath = path.join(MEDIA_DIR, safeName);
+    if (fs.existsSync(safePath) && safePath.startsWith(MEDIA_DIR)) {
       const stat = fs.statSync(safePath);
       const ext = path.extname(safePath).toLowerCase();
       const mimeTypes = {
@@ -410,7 +694,8 @@ const server = http.createServer(async (req, res) => {
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
         ".png": "image/png",
-        ".jpg": "image/jpeg"
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg"
       };
       res.writeHead(200, {
         "Content-Type": mimeTypes[ext] || "application/octet-stream",
@@ -419,16 +704,34 @@ const server = http.createServer(async (req, res) => {
       fs.createReadStream(safePath).pipe(res);
       return;
     } else {
-      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("Dosya bulunamadı.");
       return;
     }
   }
 
-  // 3. Dosya Yükleme API (/api/upload)
+  // --- BU NOKTADAN İTİBAREN TÜM ENDPOINT'LER YETKİLENDİRME (AUTH) ZORUNLUDUR ---
+  if (!verifySession(req)) {
+    res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "Yetkisiz Erişim: Lütfen önce R.O.B.I. şifrenizle giriş yapınız." }));
+    return;
+  }
+
+  // 4. Güvenli Dosya Yükleme API (/api/upload)
   if (req.method === "POST" && cleanUrl === "/api/upload") {
     const rawFilename = req.headers["x-filename"] || `upload_${Date.now()}.mp4`;
-    const safeFilename = path.basename(decodeURIComponent(rawFilename));
+    const decodedName = decodeURIComponent(rawFilename);
+    const ext = path.extname(decodedName).toLowerCase();
+
+    // Uzantı denetimi: Sadece video, ses ve görsel kabul edilir (sh, js, exe, php engellendi)
+    if (!ALLOWED_MEDIA_EXTS.has(ext)) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: "Güvenlik Engeli: Yalnızca video, ses ve görsel dosyaları yüklenebilir!" }));
+      return;
+    }
+
+    const cleanBase = path.basename(decodedName, ext).replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 50);
+    const safeFilename = `${cleanBase}_${Date.now()}${ext}`;
     const targetPath = path.join(MEDIA_DIR, safeFilename);
 
     const fileStream = fs.createWriteStream(targetPath);
@@ -450,77 +753,95 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. Sohbet & Ajan API (/api/chat)
-  if (req.method === "POST" && cleanUrl === "/api/chat") {
-    let body = "";
-    req.on("data", chunk => { body += chunk; });
-    req.on("end", async () => {
-      try {
-        const { message } = JSON.parse(body);
-        conversationHistory.push({ role: "user", content: message });
-
-        let loop = 0;
-        let isDone = false;
-        let actionsExecuted = [];
-        let finalReply = "";
-
-        while (!isDone && loop < 10) {
-          loop++;
-          const result = await callNemotron(conversationHistory);
-          const choice = result.choices[0];
-          const msg = choice.message;
-          conversationHistory.push(msg);
-
-          if (!msg.tool_calls || msg.tool_calls.length === 0) {
-            finalReply = msg.content || "İşleminiz tamamlandı efendim.";
-            isDone = true;
-            break;
-          }
-
-          for (const tc of msg.tool_calls) {
-            const fnName = tc.function.name;
-            let fnArgs = {};
-            try { fnArgs = JSON.parse(tc.function.arguments); } catch {}
-
-            console.log(`[R.O.B.I. Araç Çağrısı]: ${fnName}`, fnArgs);
-
-            let output = "";
-            if (tools[fnName]) {
-              output = tools[fnName](fnArgs);
-            } else {
-              output = `Bilinmeyen fonksiyon: ${fnName}`;
-            }
-
-            actionsExecuted.push({ name: fnName, args: fnArgs, output: String(output) });
-
-            conversationHistory.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: String(output)
-            });
-          }
-        }
-
-        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ reply: finalReply, actions: actionsExecuted }));
-      } catch (err) {
-        console.error("[Sohbet Hatası]:", err);
-        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-    });
+  // 5. Manuel Sabah Brifingi API (/api/briefing)
+  if ((req.method === "GET" || req.method === "POST") && cleanUrl === "/api/briefing") {
+    try {
+      const briefing = await triggerManualBriefing();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: true, briefing }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
     return;
   }
 
-  res.writeHead(404, { "Content-Type": "text/plain" });
+  // 6. Sohbet & Ajan API (/api/chat) - Yetkilendirilmiş ve Sıkılaştırılmış
+  if (req.method === "POST" && cleanUrl === "/api/chat") {
+    try {
+      const { message } = await readJsonBody(req);
+      if (!message || typeof message !== "string") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Mesaj içeriği gereklidir." }));
+        return;
+      }
+
+      conversationHistory.push({ role: "user", content: message.slice(0, 3000) });
+
+      let loop = 0;
+      let isDone = false;
+      let actionsExecuted = [];
+      let finalReply = "";
+
+      while (!isDone && loop < 10) {
+        loop++;
+        const result = await callNemotron(conversationHistory);
+        const choice = result.choices[0];
+        const msg = choice.message;
+        conversationHistory.push(msg);
+
+        if (!msg.tool_calls || msg.tool_calls.length === 0) {
+          finalReply = msg.content || "İşleminiz tamamlandı Mustafa Bey.";
+          isDone = true;
+          break;
+        }
+
+        for (const tc of msg.tool_calls) {
+          const fnName = tc.function.name;
+          let fnArgs = {};
+          try { fnArgs = JSON.parse(tc.function.arguments); } catch {}
+
+          console.log(`[R.O.B.I. Güvenli Araç]: ${fnName}`, fnArgs);
+
+          let output = "";
+          if (tools[fnName]) {
+            output = await tools[fnName](fnArgs);
+          } else {
+            output = `[Erişim Reddedildi]: '${fnName}' aracı güvenlik nedeniyle devre dışı bırakılmıştır veya tanımlı değildir.`;
+          }
+
+          actionsExecuted.push({ name: fnName, args: fnArgs, output: String(output) });
+
+          conversationHistory.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: String(output)
+          });
+        }
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ reply: finalReply, actions: actionsExecuted }));
+    } catch (err) {
+      console.error("[Sohbet Hatası]:", err);
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Not Found");
 });
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n======================================================`);
-  console.log(`🚀 R.O.B.I. (Robodemy Operational Brain & Intelligence)`);
-  console.log(`🌐 Sunucu Aktif: http://0.0.0.0:${PORT}`);
-  console.log(`🎬 Medya Klasörü: ${MEDIA_DIR}`);
-  console.log(`🤖 Model: ${MODEL_NAME}`);
+  console.log(`🛡️ R.O.B.I. - Güvenlik Duvarı & Kimlik Doğrulama Aktif`);
+  console.log(`🌐 Sunucu: http://0.0.0.0:${PORT}`);
+  console.log(`🔒 Yönetici Şifresi Koruması: Aktif`);
+  console.log(`🚫 Ham Terminal & Dosya Erişimi: Tamamen Kapatıldı`);
+  console.log(`📱 Telegram Durumu: ${isTelegramConfigured() ? "Bağlı ✅" : "Yapılandırılmadı ⚠️"}`);
   console.log(`======================================================\n`);
+
+  startScheduler();
 });

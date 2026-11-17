@@ -62,7 +62,7 @@
     }
 
     .voice-status {
-      font-size: 15px;
+      font-size: 14px;
       letter-spacing: 1px;
       color: #38bdf8;
       height: 24px;
@@ -143,7 +143,7 @@
       border: 1px solid rgba(56, 189, 248, 0.2);
       color: #94a3b8;
       font-size: 11px;
-      padding: 6px 12px;
+      padding: 7px 12px;
       border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s ease;
@@ -188,6 +188,12 @@
       box-shadow: 0 0 10px #10b981;
     }
 
+    .header-controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
     .toggle-label {
       font-size: 12px;
       color: #94a3b8;
@@ -195,6 +201,21 @@
       align-items: center;
       gap: 6px;
       cursor: pointer;
+    }
+
+    .logout-btn {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #f87171;
+      font-size: 11px;
+      padding: 5px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .logout-btn:hover {
+      background: rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
     }
 
     .chat-messages {
@@ -299,31 +320,130 @@
     }
     .chat-input-bar button:hover {
       background: linear-gradient(135deg, #0369a1, #0284c7);
-      box-shadow: 0 0 20px rgba(14, 165, 233, 0.4);
+      box-shadow: 0 0 15px rgba(14, 165, 233, 0.4);
     }
 
-    @keyframes pulse {
-      0% { transform: scale(1); }
-      50% { transform: scale(1.08); }
-      100% { transform: scale(1); }
+    /* ======================================================== */
+    /* 🛡️ GÜVENLİK KİLİT EKRANI (AUTH OVERLAY) */
+    /* ======================================================== */
+    #authOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      background: radial-gradient(circle at center, #0c182c 0%, #030712 90%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      transition: opacity 0.3s ease;
     }
-
-    @media (max-width: 900px) {
-      body { flex-direction: column; }
-      .visualizer-pane { width: 100%; height: auto; border-right: none; border-bottom: 1px solid rgba(56, 189, 248, 0.15); padding: 15px; }
-      canvas#coreCanvas { width: 180px; height: 180px; }
-      .chat-pane { height: 60vh; }
+    #authOverlay.hidden {
+      display: none;
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 420px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      box-shadow: 0 0 50px rgba(56, 189, 248, 0.25);
+      border-radius: 20px;
+      padding: 40px 30px;
+      text-align: center;
+      backdrop-filter: blur(15px);
+    }
+    .auth-icon {
+      font-size: 48px;
+      margin-bottom: 15px;
+      display: inline-block;
+      filter: drop-shadow(0 0 15px #38bdf8);
+    }
+    .auth-card h2 {
+      font-size: 24px;
+      letter-spacing: 3px;
+      color: #38bdf8;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .auth-card p {
+      font-size: 13px;
+      color: #94a3b8;
+      line-height: 1.5;
+      margin-bottom: 25px;
+    }
+    .auth-input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 15px;
+    }
+    .auth-input-group input {
+      width: 100%;
+      background: rgba(3, 7, 18, 0.8);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 14px 18px;
+      border-radius: 10px;
+      color: #ffffff;
+      font-size: 15px;
+      text-align: center;
+      letter-spacing: 2px;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    .auth-input-group input:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+    }
+    .auth-btn {
+      width: 100%;
+      background: linear-gradient(135deg, #0284c7, #0ea5e9);
+      border: none;
+      color: white;
+      font-weight: 600;
+      padding: 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+      letter-spacing: 1px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 15px rgba(2, 132, 199, 0.4);
+    }
+    .auth-btn:hover {
+      background: linear-gradient(135deg, #0369a1, #0284c7);
+      transform: translateY(-1px);
+    }
+    .auth-error {
+      color: #f87171;
+      font-size: 12px;
+      margin-top: 15px;
+      line-height: 1.4;
+      min-height: 20px;
     }
   </style>
 </head>
 <body>
+
+  <!-- 🛡️ GÜVENLİK DUVARI KİLİT EKRANI -->
+  <div id="authOverlay">
+    <div class="auth-card">
+      <div class="auth-icon">🛡️</div>
+      <h2>R.O.B.I. GÜVENLİK DUVARI</h2>
+      <p>Sistem ve sunucu kontrolleri koruma altındadır.<br>Lütfen yetkili yönetici şifresini giriniz.</p>
+      
+      <div class="auth-input-group">
+        <input type="password" id="authPassword" placeholder="Yönetici Şifresi..." autocomplete="current-password">
+        <button class="auth-btn" id="authSubmitBtn">Sisteme Giriş Yap</button>
+      </div>
+      <div class="auth-error" id="authErrorMsg"></div>
+    </div>
+  </div>
 
   <!-- Sol Panel: Hologram ve Ses -->
   <div class="visualizer-pane">
     <div class="hud-title">
       <h1>R.O.B.I.</h1>
       <p>Robodemy Operational Brain & Intelligence</p>
-      <div class="model-badge">● NVIDIA Nemotron 3.5 Lightning</div>
+      <div class="model-badge">● Güvenli Mod (Yetkili Erişim)</div>
     </div>
 
     <!-- Holografik Çekirdek -->
@@ -337,16 +457,18 @@
 
     <!-- Video Yükleme Kutusu -->
     <div class="upload-box" onclick="document.getElementById('fileInput').click()">
-      <input type="file" id="fileInput" accept="video/*,audio/*" onchange="uploadFile(this.files[0])">
-      <strong>🎬 Video Yükle / Düzenle</strong>
+      <input type="file" id="fileInput" accept="video/*,audio/*,image/*" onchange="uploadFile(this.files[0])">
+      <strong>🎬 Medya Yükle / Düzenle</strong>
       <span>Tıkla veya video dosyasını buraya bırak</span>
     </div>
 
-    <!-- Hızlı İşlem Düğmeleri -->
+    <!-- Hızlı İşlem Düğmeleri (Yalnızca Güvenli Operasyonlar) -->
     <div class="quick-actions">
-      <button class="action-btn" onclick="sendQuickMessage('Sunucu durumunu, RAM, CPU ve GPU durumunu raporla.')">📊 Sistem Durumu</button>
-      <button class="action-btn" onclick="sendQuickMessage('Media klasöründeki videoları listele.')">📁 Videoları Listele</button>
-      <button class="action-btn" onclick="sendQuickMessage('Hangi video düzenleme komutlarını yapabilirsin?')">⚡ Yetenekler</button>
+      <button class="action-btn" onclick="sendQuickMessage('Sabah brifingini hazırla ve özetle.')">🌅 Sabah Brifingi</button>
+      <button class="action-btn" onclick="sendQuickMessage('Gelen kutumdaki son e-postaları kontrol et.')">📧 E-Postalar</button>
+      <button class="action-btn" onclick="sendQuickMessage('Sunucunun RAM, CPU ve disk durumunu raporla.')">📊 Sistem Sağlığı</button>
+      <button class="action-btn" onclick="sendQuickMessage('Sunucuda çalışan Docker servislerini listele.')">🐳 Servis Durumu</button>
+      <button class="action-btn" onclick="sendQuickMessage('Media klasöründeki video ve ses dosyalarını listele.')">🎬 Medya Dosyaları</button>
     </div>
   </div>
 
@@ -354,14 +476,17 @@
   <div class="chat-pane">
     <div class="chat-header">
       <h2><span class="status-indicator"></span> R.O.B.I. Operasyon Paneli</h2>
-      <label class="toggle-label">
-        <input type="checkbox" id="voiceToggle" checked> Sesli Yanıt Ver
-      </label>
+      <div class="header-controls">
+        <label class="toggle-label">
+          <input type="checkbox" id="voiceToggle" checked> Sesli Yanıt Ver
+        </label>
+        <button class="logout-btn" onclick="logout()" title="Güvenli Çıkış Yap">🔒 Çıkış</button>
+      </div>
     </div>
 
     <div class="chat-messages" id="chatMessages">
       <div class="message robi">
-        Merhaba efendim! Ben <strong>R.O.B.I.</strong> (Robodemy Operational Brain & Intelligence). Sunucunuzu yönetebilir, dosyalarınızı kontrol edebilir ve videolarınızı (kesme, 9:16 reels formatı yapma, ses ayıklama) düzenleyebilirim. Size nasıl yardımcı olabilirim?
+        Merhaba Mustafa Bey! Ben <strong>R.O.B.I.</strong> E-postalarınızı yönetebilir, sabah brifinginizi hazırlayabilir, sistem sağlığını ve Docker servislerini takip edebilir, videolarınızı (kesme, 9:16 reels formatı yapma, ses ayıklama) düzenleyebilirim. Size nasıl yardımcı olabilirim?
       </div>
     </div>
 
@@ -372,6 +497,106 @@
   </div>
 
   <script>
+    // 0. GÜVENLİK VE KİMLİK DOĞRULAMA YÖNETİMİ
+    const BASE_PATH = window.location.pathname.replace(/\/+$/, "").replace(/\/index\.html$/i, "");
+    const authOverlay = document.getElementById("authOverlay");
+    const authPassword = document.getElementById("authPassword");
+    const authSubmitBtn = document.getElementById("authSubmitBtn");
+    const authErrorMsg = document.getElementById("authErrorMsg");
+
+    let authToken = localStorage.getItem("robi_token") || "";
+
+    function lockUI(msg = "") {
+      authToken = "";
+      localStorage.removeItem("robi_token");
+      authOverlay.classList.remove("hidden");
+      authPassword.value = "";
+      authPassword.focus();
+      if (msg) authErrorMsg.textContent = msg;
+    }
+
+    function unlockUI(token) {
+      authToken = token;
+      localStorage.setItem("robi_token", token);
+      authOverlay.classList.add("hidden");
+      authErrorMsg.textContent = "";
+      userInput.focus();
+    }
+
+    async function handleLogin() {
+      const pwd = authPassword.value;
+      if (!pwd) return;
+      authErrorMsg.textContent = "Doğrulanıyor...";
+
+      try {
+        const resp = await fetch(`${BASE_PATH}/api/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pwd })
+        });
+        const data = await resp.json();
+
+        if (resp.ok && data.success) {
+          unlockUI(data.token);
+        } else {
+          authErrorMsg.textContent = data.error || "Hatalı şifre!";
+          authPassword.value = "";
+          authPassword.focus();
+        }
+      } catch (err) {
+        authErrorMsg.textContent = "Giriş sunucusuna ulaşılamadı: " + err.message;
+      }
+    }
+
+    authSubmitBtn.addEventListener("click", handleLogin);
+    authPassword.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleLogin();
+    });
+
+    async function checkAuthOnStartup() {
+      if (!authToken) {
+        lockUI();
+        return;
+      }
+      try {
+        const resp = await fetch(`${BASE_PATH}/api/auth/verify`, {
+          headers: { "Authorization": `Bearer ${authToken}` }
+        });
+        if (resp.ok) {
+          authOverlay.classList.add("hidden");
+        } else {
+          lockUI("Oturum süreniz doldu. Lütfen tekrar giriş yapın.");
+        }
+      } catch (e) {
+        lockUI();
+      }
+    }
+    checkAuthOnStartup();
+
+    async function logout() {
+      try {
+        await fetch(`${BASE_PATH}/api/auth/logout`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${authToken}` }
+        });
+      } catch {}
+      lockUI("Güvenli çıkış yapıldı.");
+    }
+
+    // Yetkilendirilmiş API İstek Yardımcısı
+    async function authFetch(url, options = {}) {
+      options.headers = options.headers || {};
+      if (authToken) {
+        options.headers["Authorization"] = `Bearer ${authToken}`;
+      }
+      const resp = await fetch(url, options);
+      if (resp.status === 401) {
+        lockUI("Oturum süreniz doldu veya yetkisiz erişim. Lütfen giriş yapın.");
+        throw new Error("Yetkilendirme gerekli.");
+      }
+      return resp;
+    }
+
     // 1. Holografik Çekirdek Animasyonu
     const canvas = document.getElementById("coreCanvas");
     const ctx = canvas.getContext("2d");
@@ -386,10 +611,7 @@
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
 
-      let baseColor = "#38bdf8";
-      if (isListening) baseColor = "#ef4444";
-      else if (isProcessing) baseColor = "#f59e0b";
-      else if (isSpeaking) baseColor = "#10b981";
+      let baseColor = isSpeaking ? "#38bdf8" : (isListening ? "#ef4444" : (isProcessing ? "#f59e0b" : "#0284c7"));
 
       // Dış Halka
       ctx.save();
@@ -404,7 +626,7 @@
       ctx.stroke();
       ctx.restore();
 
-      // İç Halka (Ters Yöne Döner)
+      // İç Halka
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(-angle * 1.5);
@@ -435,7 +657,6 @@
     drawCore();
 
     // 2. Mesajlaşma ve API İletişimi
-    const BASE_PATH = window.location.pathname.replace(/\/+$/, "").replace(/\/index\.html$/i, "");
     const chatMessages = document.getElementById("chatMessages");
     const userInput = document.getElementById("userInput");
     const sendBtn = document.getElementById("sendBtn");
@@ -447,11 +668,9 @@
       const msgDiv = document.createElement("div");
       msgDiv.className = `message ${role}`;
 
-      // Metni formatla
       let formattedText = text.replace(/\n/g, "<br>");
       msgDiv.innerHTML = formattedText;
 
-      // Araç çağrıları varsa göster
       if (actions && actions.length > 0) {
         actions.forEach(act => {
           const tb = document.createElement("div");
@@ -461,8 +680,8 @@
         });
       }
 
-      // Eğer yanıtta bir video bağlantısı (/media/*.mp4) varsa doğrudan video oynatıcı ekle!
-      const mediaMatch = text.match(/\/?media\/([^\s\)"']+?\.(mp4|webm|mov))/i);
+      // Video bağlantısı varsa önizleme oynatıcı ekle
+      const mediaMatch = text.match(/\/?media\/([a-zA-Z0-9_\.\-]+\.(mp4|webm|mov))/i);
       if (mediaMatch) {
         const videoUrl = `${BASE_PATH}/media/${mediaMatch[1]}`;
         const vBox = document.createElement("div");
@@ -486,7 +705,7 @@
       voiceStatus.textContent = "R.O.B.I. düşünüyor...";
 
       try {
-        const resp = await fetch(`${BASE_PATH}/api/chat`, {
+        const resp = await authFetch(`${BASE_PATH}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: cleanText })
@@ -496,8 +715,8 @@
         isProcessing = false;
 
         if (data.error) {
-          addMessage(`[Hata]: ${data.error}`, "robi");
-          voiceStatus.textContent = "Bir hata oluştu.";
+          addMessage(`[Uyarı]: ${data.error}`, "robi");
+          voiceStatus.textContent = "İşlem yapılamadı.";
         } else {
           addMessage(data.reply, "robi", data.actions);
           voiceStatus.textContent = "İşlem tamamlandı.";
@@ -508,8 +727,10 @@
         }
       } catch (err) {
         isProcessing = false;
-        addMessage(`[Bağlantı Hatası]: ${err.message}`, "robi");
-        voiceStatus.textContent = "Sunucuya ulaşılamadı.";
+        if (err.message !== "Yetkilendirme gerekli.") {
+          addMessage(`[Bağlantı Hatası]: ${err.message}`, "robi");
+          voiceStatus.textContent = "Sunucuya ulaşılamadı.";
+        }
       }
     }
 
@@ -527,7 +748,6 @@
       if (!window.speechSynthesis) return;
       window.speechSynthesis.cancel();
 
-      // Markdown ve URL'leri sesten temizle
       const cleanText = text.replace(/\/media\/\S+/g, "medya dosyası")
                             .replace(/[*_#`]/g, "")
                             .slice(0, 300);
@@ -543,7 +763,7 @@
       window.speechSynthesis.speak(utterance);
     }
 
-    // 4. Ses Algılama (Mikrofon - Speech-to-Text)
+    // 4. Ses Algılama (Mikrofon)
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     let recognition = null;
 
@@ -587,13 +807,13 @@
       micBtn.style.display = "none";
     }
 
-    // 5. Dosya Yükleme Fonksiyonu
+    // 5. Güvenli Medya Yükleme Fonksiyonu
     async function uploadFile(file) {
       if (!file) return;
       voiceStatus.textContent = `"${file.name}" yükleniyor...`;
 
       try {
-        const resp = await fetch(`${BASE_PATH}/api/upload`, {
+        const resp = await authFetch(`${BASE_PATH}/api/upload`, {
           method: "POST",
           headers: {
             "Content-Type": "application/octet-stream",
@@ -606,13 +826,14 @@
         if (res.success) {
           addMessage(`📁 <strong>${res.filename}</strong> başarıyla sunucuya yüklendi!`, "robi");
           voiceStatus.textContent = "Dosya yüklendi.";
-          // Ajanı otomatik bilgilendir
-          sendMessage(`'${res.filename}' dosyasını media klasörüne yükledim. Bilgilerini kontrol edip ne yapabileceğimizi söyler misin?`);
+          sendMessage(`'${res.filename}' dosyasını media klasörüne yükledim. Bilgilerini kontrol edebilir misin?`);
         } else {
           alert("Yükleme hatası: " + res.error);
         }
       } catch (err) {
-        alert("Yükleme başarısız: " + err.message);
+        if (err.message !== "Yetkilendirme gerekli.") {
+          alert("Yükleme başarısız: " + err.message);
+        }
       }
     }
   </script>
